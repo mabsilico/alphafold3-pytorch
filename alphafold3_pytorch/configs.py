@@ -288,10 +288,8 @@ class TrainerConfig(BaseModelWithExtra):
         trainer_kwargs.update(dict(
             model = alphafold3,
             fabric = fabric,
-            test_dataset = test_dataset,
             optimizer = optimizer,
             scheduler = scheduler,
-            valid_dataset = valid_dataset,
             map_dataset_input_fn = map_dataset_input_fn,
             loggers = loggers
         ))
