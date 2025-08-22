@@ -226,10 +226,10 @@ class TrainerConfig(BaseModelWithExtra):
             trainer_kwargs.update(dataset = dataset)
 
         if exists(valid_dataset):
-            trainer_kwargs.update(valid_dataset = dataset)
+            trainer_kwargs.update(valid_dataset = valid_dataset)
 
         if exists(test_dataset):
-            trainer_kwargs.update(test_dataset = dataset)
+            trainer_kwargs.update(test_dataset = test_dataset)
 
         if exists(self.dataset_config):
             dataset_config = self.dataset_config
