@@ -342,6 +342,11 @@ class Biomolecule:
             mmcif_metadata=self.mmcif_metadata,
         )
 
+    def contiguousChainCrop(self, chainIds) -> Tuple["Biomolecule", List[Tuple[str, int]], List[np.ndarray]]:
+        chain_ids_and_lengths = list(collections.Counter(self.chain_id).items())
+        crop_masks = createContiguousChainCropMasks(chain_ids_and_lengths, chainIds)
+        return self.crop_chains_with_masks(chain_ids_and_lengths, crop_masks), chain_ids_and_lengths, crop_masks
+
     def contiguous_crop(self, n_res: int = 384) -> Tuple["Biomolecule", List[Tuple[str, int]], List[np.ndarray]]:
         """Crop a Biomolecule to only include contiguous polymer residues and/or ligand atoms for
         each chain."""
@@ -488,6 +493,28 @@ class Biomolecule:
         crop_fn = random.choices(crop_fns, crop_fn_weights)[0]  # nosec
         return crop_fn()
 
+    def crop(self, chainIds: List[str]):
+        return self.contiguousChainCrop(chainIds)
+
+
+@typecheck
+def createContiguousChainCropMasks(
+    chain_ids_and_lengths: List[Tuple[str, int]], chainIds: List[str]) -> List[np.ndarray]:
+    """Create contiguous crop masks for each given chain.
+
+    Implements Algorithm 1 from the AlphaFold-Multimer paper.
+    """
+    masks = []
+    for chain_id_and_length in chain_ids_and_lengths:
+        chainId, chainLength = chain_id_and_length
+        if chainId in chainIds:
+            mask = np.ones(chainLength, dtype=bool)
+        else:
+            mask = np.zeros(chainLength, dtype=bool)
+
+        masks.append(mask)
+
+    return masks
 
 @typecheck
 def create_contiguous_crop_masks(

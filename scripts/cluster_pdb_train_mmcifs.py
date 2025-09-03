@@ -451,7 +451,7 @@ def cluster_sequences_using_mmseqs2(
     local_chain_cluster_mapping = pl.DataFrame(
         chain_cluster_mapping.get_column("cluster_member")
         .map_elements(
-            extract_pdb_chain_and_molecule_ids_from_clustering_string, return_dtype=pl.List
+            extract_pdb_chain_and_molecule_ids_from_clustering_string
         )
         .to_list(),
         schema=["pdb_id", "chain_id", "molecule_id"],

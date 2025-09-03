@@ -571,9 +571,9 @@ def default_none_fields_atom_input(i: AtomInput) -> AtomInput:
 @typecheck
 def pdb_dataset_to_atom_inputs(
     pdb_dataset: PDBDataset,
+    pdbIdChainIdsPairs: list,
     *,
     output_atom_folder: str | Path | None = None,
-    indices: Iterable | None = None,
     return_atom_dataset: bool = False,
     n_jobs: int = 8,
     parallel_kwargs: dict = dict(),
@@ -588,30 +588,49 @@ def pdb_dataset_to_atom_inputs(
     if isinstance(output_atom_folder, str):
         output_atom_folder = Path(output_atom_folder)
 
-    if not exists(indices):
-        indices = torch.randperm(len(pdb_dataset)).tolist()
-
     to_atom_input_fn = compose(pdb_input_to_molecule_input, molecule_to_atom_input)
 
-    def should_process_pdb_input(index: int) -> bool:
+    def formIdentifier(pdbIdChainIdsPair):
+        return pdbIdChainIdsPair[0] + '_' + ''.join(pdbIdChainIdsPair[1])
+
+    def should_process_pdb_input(identifier: str) -> bool:
         """Check if a PDB input should be processed."""
-        atom_input_path = output_atom_folder / f"{index}.pt"
+        atom_input_path = output_atom_folder / f"{identifier}.pt"
         return not atom_input_path.exists() or overwrite_existing
 
     @delayed
-    def pdb_input_to_atom_file(index: int, path: str):
+    def delayed_pdb_input_to_atom_file(pdbIdChainIdsPair: tuple, path: str):
+        pdb_input_to_atom_file(pdbIdChainIdsPair, path)
+
+    def pdb_input_to_atom_file(pdbIdChainIdsPair: tuple, path: str):
         """Convert a PDB input to an atom file."""
-        pdb_input = pdb_dataset[index]
+        pdbId, chainIds = pdbIdChainIdsPair
+        pdb_input = pdb_dataset[pdbId]
+        pdb_input.chains = chainIds
 
         atom_input = to_atom_input_fn(pdb_input)
 
-        atom_input_path = path / f"{index}.pt"
-        atom_input_to_file(atom_input, atom_input_path)
+        atom_input_path = path / f"{formIdentifier(pdbIdChainIdsPair)}.pt"
+        atom_input_to_file(atom_input, atom_input_path, overwrite_existing)
 
-    Parallel(n_jobs=n_jobs, **parallel_kwargs)(
-        pdb_input_to_atom_file(index, output_atom_folder)
-        for index in filter(should_process_pdb_input, indices)
-    )
+    if not overwrite_existing:
+        kept = []
+        for pair in pdbIdChainIdsPairs:
+            atom_input_path = output_atom_folder / f'{formIdentifier(pair)}.pt'
+            if not atom_input_path.exists():
+                kept.append(pair)
+
+        pdbIdChainIdsPairs = kept
+
+    if n_jobs == 1:
+        for pair in pdbIdChainIdsPairs:
+            pdb_input_to_atom_file(pair, output_atom_folder)
+
+    else:
+        Parallel(n_jobs=n_jobs, **parallel_kwargs)(
+            delayed_pdb_input_to_atom_file(pair, output_atom_folder)
+            for pair in pdbIdChainIdsPairs
+        )
 
     if not return_atom_dataset:
         return output_atom_folder
@@ -3072,9 +3091,8 @@ def pdb_input_to_molecule_input(
 
     # perform release date filtering as requested
 
-    mmcif_release_date = datetime.strptime(mmcif_release_date, "%Y-%m-%d")
-
     if exists(i.cutoff_date):
+        mmcif_release_date = datetime.strptime(mmcif_release_date, "%Y-%m-%d")
         cutoff_date = datetime.strptime(i.cutoff_date, "%Y-%m-%d")
         assert (
             mmcif_release_date <= cutoff_date
@@ -3140,28 +3158,6 @@ def pdb_input_to_molecule_input(
             )
 
         i.chains = (chain_id_1, chain_id_2)
-
-    # map (sampled) chain IDs to indices prior to cropping
-
-    chains = None
-
-    if exists(i.chains):
-        chain_id_1, chain_id_2 = i.chains
-        chain_id_to_idx = {
-            chain_id: chain_idx
-            for (chain_id, chain_idx) in zip(biomol.chain_id, biomol.chain_index)
-        }
-        # NOTE: we have to manually nullify a chain ID value
-        # e.g., if an empty string is passed in as a "null" chain ID
-        if chain_id_1:
-            chain_id_1 = chain_id_to_idx[chain_id_1]
-        else:
-            chain_id_1 = None
-        if chain_id_2:
-            chain_id_2 = chain_id_to_idx[chain_id_2]
-        else:
-            chain_id_2 = None
-        chains = (chain_id_1, chain_id_2)
 
     # construct multiple sequence alignment (MSA) and template features prior to cropping
 
@@ -3295,16 +3291,7 @@ def pdb_input_to_molecule_input(
         ), "A cropping configuration must be provided during training."
         try:
             assert exists(i.chains), "Chain IDs must be provided for cropping during training."
-            chain_id_1, chain_id_2 = i.chains
-
-            cropped_biomol, chain_ids_and_lengths, crop_masks = biomol.crop(
-                contiguous_weight=i.cropping_config["contiguous_weight"],
-                spatial_weight=i.cropping_config["spatial_weight"],
-                spatial_interface_weight=i.cropping_config["spatial_interface_weight"],
-                n_res=i.cropping_config["n_res"],
-                chain_1=chain_id_1 if chain_id_1 else None,
-                chain_2=chain_id_2 if chain_id_2 else None,
-            )
+            cropped_biomol, chain_ids_and_lengths, crop_masks = biomol.crop(i.chains)
 
             # retrieve cropped residue and token metadata
             residue_index = (
@@ -3342,35 +3329,7 @@ def pdb_input_to_molecule_input(
                 )
             }
 
-            if chain_id_1:
-                chain_idx_1 = uncropped_chain_id_to_cropped_chain_idx.get(chain_id_1)
-            else:
-                chain_idx_1 = None
-            if chain_id_2:
-                chain_idx_2 = uncropped_chain_id_to_cropped_chain_idx.get(chain_id_2)
-            else:
-                chain_idx_2 = None
-
-            # NOTE: e.g., when contiguously cropping structures, the sampled chains
-            # may be missing from the cropped structure, in which case we must
-            # re-sample new chains specifically for validation model selection scoring
-            if not_exists(chain_idx_1) and not_exists(chain_idx_2):
-                input_chain_id_1, input_chain_id_2 = i.chains
-
-                if (
-                    exists(input_chain_id_1)
-                    and exists(input_chain_id_2)
-                    and len(uncropped_chain_id_to_cropped_chain_idx) > 1
-                ):
-                    chain_idx_1, chain_idx_2 = sorted(
-                        random.sample(list(uncropped_chain_id_to_cropped_chain_idx.values()), 2)
-                    )  # nosec
-                else:
-                    chain_idx_1 = random.choice(
-                        list(uncropped_chain_id_to_cropped_chain_idx.values())
-                    )  # nosec
-
-            chains = (chain_idx_1, chain_idx_2)
+            chainIndices = tuple(uncropped_chain_id_to_cropped_chain_idx.values())
 
             # update biomolecule after cropping
             biomol = cropped_biomol
@@ -3989,7 +3948,7 @@ def pdb_input_to_molecule_input(
         msa_mask=msa_row_mask,
         resolved_labels=resolved_labels,
         resolution=resolution,
-        chains=chains,
+        chains=chainIndices,
         filepath=filepath,
         add_atom_ids=i.add_atom_ids,
         add_atompair_ids=i.add_atompair_ids,
@@ -4412,19 +4371,7 @@ class PDBDataset(Dataset):
 
     def __getitem__(self, idx: int | str, max_attempts: int = 50) -> PDBInput | AtomInput:
         """Return either a PDBInput or an AtomInput object for the specified index."""
-        assert max_attempts > 0, "The maximum number of attempts must be greater than 0."
-
-        i = self.get_item(idx)
-
-        if not_exists(i):
-            random_idx = not_exists(self.sampler)
-
-            retry_decorator = retry(
-                retry_on_result=not_exists, stop_max_attempt_number=max_attempts
-            )
-            i = retry_decorator(self.get_item)(idx, random_idx=random_idx)
-
-        return i
+        return self.get_item(idx)
 
 
 class PDBDistillationDataset(Dataset):

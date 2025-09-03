@@ -36,6 +36,7 @@ from pydantic.types import (
 )
 
 from lightning.fabric.loggers import TensorBoardLogger
+from Bio.PDB.MMCIFParser import MMCIFParser
 
 # functions
 
@@ -193,12 +194,13 @@ class TrainerConfig(BaseModelWithExtra):
     def create_instance(
         self,
         dataset: Dataset | None = None,
+        valid_dataset: Dataset | None = None,
+        test_dataset: Dataset | None = None,
+
         model: Alphafold3 | None = None,
         fabric: Fabric | None = None,
-        test_dataset: Dataset | None = None,
         optimizer: Optimizer | None = None,
         scheduler: LRScheduler | None = None,
-        valid_dataset: Dataset | None = None,
         map_dataset_input_fn: Callable | None = None,
     ) -> Trainer:
 
@@ -226,10 +228,10 @@ class TrainerConfig(BaseModelWithExtra):
             trainer_kwargs.update(dataset = dataset)
 
         if exists(valid_dataset):
-            trainer_kwargs.update(valid_dataset = dataset)
+            trainer_kwargs.update(valid_dataset = valid_dataset)
 
         if exists(test_dataset):
-            trainer_kwargs.update(test_dataset = dataset)
+            trainer_kwargs.update(test_dataset = test_dataset)
 
         if exists(self.dataset_config):
             dataset_config = self.dataset_config
@@ -252,7 +254,11 @@ class TrainerConfig(BaseModelWithExtra):
 
             # create dataset for train, valid, and test
 
-            for trainer_kwarg_key, config_key in (('dataset', 'train_folder'), ('valid_dataset', 'valid_folder'), ('test_dataset', 'test_folder')):
+            for trainer_kwarg_key, config_key in (
+                    ('dataset', 'train_folder'),
+                    ('valid_dataset', 'valid_folder'),
+                    ('test_dataset', 'test_folder')
+                    ):
                 folder = getattr(dataset_config, config_key, None)
 
                 if not exists(folder):
@@ -262,8 +268,27 @@ class TrainerConfig(BaseModelWithExtra):
 
                 dataset = dataset_klass(folder, **dataset_kwargs)
 
+                # Computing `pdbIdChainIdsPairs`.
+                pdbIdToChainIds = {}
+                for pdbId, filepath in dataset.files.items():
+                    parser = MMCIFParser()
+                    structure = parser.get_structure('structure', filepath)
+
+                    chainIds = pdbIdToChainIds.setdefault(pdbId, [])
+                    for model in structure:
+                        for chain in model:
+                            chainIds.append(chain.id)
+
+                        # Only looking at the first model.
+                        break
+
+                pdbIdChainIdsPairs = []
+                for pdbId, chainIds in pdbIdToChainIds.items():
+                    for chainId in chainIds:
+                        pdbIdChainIdsPairs.append((pdbId, (chainId,)))
+
                 if convert_pdb_to_atom:
-                    dataset = pdb_dataset_to_atom_inputs(dataset, return_atom_dataset = True, **pdb_to_atom_kwargs)
+                    dataset = pdb_dataset_to_atom_inputs(dataset, pdbIdChainIdsPairs, return_atom_dataset = True, **pdb_to_atom_kwargs)
 
                 trainer_kwargs.update(**{trainer_kwarg_key: dataset})
 
@@ -288,10 +313,8 @@ class TrainerConfig(BaseModelWithExtra):
         trainer_kwargs.update(dict(
             model = alphafold3,
             fabric = fabric,
-            test_dataset = test_dataset,
             optimizer = optimizer,
             scheduler = scheduler,
-            valid_dataset = valid_dataset,
             map_dataset_input_fn = map_dataset_input_fn,
             loggers = loggers
         ))
