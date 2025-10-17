@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import glob
+import io
 import json
 import os
 import gzip
@@ -513,6 +514,12 @@ class BatchedAtomInput:
         """Return the dataclass as a dictionary without certain model fields."""
         return without_keys(self.dict(), ATOM_INPUT_EXCLUDE_MODEL_FIELDS)
 
+    def to(self, device):
+        for field in self.__dict__.keys():
+            member = getattr(self, field)
+            if torch.is_tensor(member):
+                setattr(self, field, member.to(device))
+
 
 # functions for saving an AtomInput to disk or loading from disk to AtomInput
 
@@ -526,12 +533,14 @@ def atom_input_to_file(atom_input: AtomInput, path: str | Path, overwrite: bool 
 
     path = Path(path)
 
-    if not overwrite:
-        assert not path.exists()
+    if not overwrite and path.exists():
+        return path
 
     path.parents[0].mkdir(exist_ok=True, parents=True)
 
-    torch.save(atom_input.dict(), str(path))
+    with gzip.open(str(path), 'wb') as handle:
+        torch.save(atom_input.dict(), handle)
+
     return path
 
 
@@ -543,7 +552,11 @@ def file_to_atom_input(path: str | Path) -> AtomInput:
 
     assert path.is_file()
 
-    atom_input_dict = torch.load(str(path), weights_only=True)
+    with gzip.open(str(path), 'rb') as handle:
+        # May be faster.
+        x = io.BytesIO(handle.read())
+        atom_input_dict = torch.load(x, weights_only=True)
+
     return AtomInput(**atom_input_dict)
 
 
@@ -610,7 +623,7 @@ def pdb_dataset_to_atom_inputs(
 
         atom_input = to_atom_input_fn(pdb_input)
 
-        atom_input_path = path / f"{formIdentifier(pdbIdChainIdsPair)}.pt"
+        atom_input_path = path / f"{formIdentifier(pdbIdChainIdsPair)}.pt.gz"
         atom_input_to_file(atom_input, atom_input_path, overwrite_existing)
 
     if not overwrite_existing:
@@ -622,6 +635,7 @@ def pdb_dataset_to_atom_inputs(
 
         pdbIdChainIdsPairs = kept
 
+    pdbIdChainIdsPairs.sort(key=lambda x: x[0])
     if n_jobs == 1:
         for pair in pdbIdChainIdsPairs:
             pdb_input_to_atom_file(pair, output_atom_folder)
@@ -651,9 +665,9 @@ class AtomDataset(Dataset):
         assert folder.exists() and folder.is_dir(), f"Atom dataset not found at {str(folder)}"
 
         self.folder = folder
-        self.files = [*folder.glob("**/*.pt")]
+        self.files = [*folder.glob("**/*.pt.gz")]
 
-        assert len(self) > 0, f"No valid atom `.pt` files found at {str(folder)}"
+        assert len(self) > 0, f"No valid atom `.pt.gz` files found at {str(folder)}"
 
     def __len__(self) -> int:
         """Return the length of the dataset."""

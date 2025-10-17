@@ -80,9 +80,10 @@ def to_device_and_back(
     if need_move_device:
         module.to(orig_device)
 
-def cycle(dataloader: DataLoader):
+def cycle(dataloader: DataLoader, device):
     while True:
         for batch in dataloader:
+            batch.to(device)
             yield batch
 
 @typecheck
@@ -511,10 +512,11 @@ class Trainer:
 
         # cycle through dataloader
 
-        dl = cycle(self.dataloader)
+        dl = cycle(self.dataloader, self.device)
 
         # while less than required number of training steps
 
+        points = []
         while self.steps < self.num_train_steps:
 
             self.model.train()
@@ -595,6 +597,8 @@ class Trainer:
                     valid_loss_breakdown = None
 
                     for valid_batch in self.valid_dataloader:
+                        valid_batch.to(self.device)
+
                         valid_loss, loss_breakdown = eval_model(
                             **valid_batch.model_forward_dict(),
                             return_loss_breakdown = True
@@ -627,6 +631,7 @@ class Trainer:
                 self.save_checkpoint()
 
             self.wait()
+            points.append((self.steps, total_loss, total_valid_loss))
 
         # maybe test
 
@@ -640,6 +645,7 @@ class Trainer:
                 test_loss_breakdown = None
 
                 for test_batch in self.test_dataloader:
+                    test_batch.to(self.device)
                     test_loss, loss_breakdown = eval_model(
                         **test_batch.model_forward_dict(),
                         return_loss_breakdown = True
@@ -667,3 +673,8 @@ class Trainer:
             self.log(**test_loss_breakdown)
 
         print('training complete')
+        import csv
+        with open('points.csv', 'w') as  handle:
+            writer = csv.writer(handle, lineterminator='\n')
+            writer.writerows(points)
+
